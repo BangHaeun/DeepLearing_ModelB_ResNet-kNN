@@ -1,21 +1,25 @@
 # ===== 경로 =====
-data_root: /content/MIMII_project_preprocessed        # zip을 푼 위치 (Colab 로컬 디스크)
-out_root: /content/drive/MyDrive/MIMII_project/outputs # 특징/점수/결과 저장 (Drive)
+data_root: /content/MIMII_project_preprocessed
+out_root: /content/drive/MyDrive/MIMII_project/outputs
 
-# 폴더 구조 템플릿. inspect_data.py 결과를 보고 실제 구조에 맞게 수정할 것.
-# 사용 가능한 칸: {snr} {machine} {id} {sr} {label}(normal/abnormal)
+# 공통 spectrogram 정규화 통계.
+# 전처리 담당이 training-normal에서 계산해 저장한 값을 A/B가 동일하게 사용한다.
+normalization_stats: /content/MIMII_project_preprocessed/project/normalization_stats.json
+
+# 기존 파일별 로더용 템플릿.
+# 실제 배포 데이터는 (clip,8,128,64) 묶음 + manifest 구조이므로 manifest 기반 로더로 수정 예정.
 layout: "{snr}/{machine}/id_{id}/{label}/*.npy"
 
 # ===== 실험 조건 =====
 machines: [pump, fan]
 ids: ["00", "02"]
-snrs: ["6dB"]          # Exp2: ["6dB", "0dB", "-6dB"]
-srs: [16000]           # Exp3: [16000, 8000, 4000, 2000]
-layers: [layer4]       # Exp4: [layer4, layer3]
-k: 1                   # 부록: 3, 5
+snrs: ["6dB"]
+srs: [16000]
+layers: [layer4]
+k: 1
 seeds: [0, 1, 2]
 
 # ===== 분할·평가 =====
-val_frac: 0.1              # 학습용 정상 중 검증으로 뗄 비율
-threshold_percentile: 95   # 검증 정상 점수의 이 백분위를 임계치로 사용
+val_frac: 0.1
+threshold_percentile: 95
 batch_size: 256
