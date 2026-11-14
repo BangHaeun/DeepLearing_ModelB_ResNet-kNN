@@ -2,7 +2,6 @@
 data_root: /content/MIMII_project_preprocessed
 project_root: /content/MIMII_project_preprocessed/project
 manifest: /content/MIMII_project_preprocessed/project/manifest.csv
-normalization_stats: /content/MIMII_project_preprocessed/project/normalization_stats.json
 out_root: /content/drive/MyDrive/MIMII_project/outputs
 
 # ===== 실험 조건 =====
@@ -12,7 +11,9 @@ snrs: [6]               # Exp2: [6, 0, -6]
 srs: [16000]            # Exp3: [16000, 8000, 4000, 2000]
 layers: [layer4]        # Exp4: [layer4, layer3]
 k: 1                    # 부록: 3, 5
+seeds: [0, 1, 2]
 
-# ===== 평가 =====
+# ===== 분할·평가 =====
+val_frac: 0.1
 threshold_percentile: 95
 batch_size: 256
