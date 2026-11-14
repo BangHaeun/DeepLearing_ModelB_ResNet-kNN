@@ -1,25 +1,18 @@
 # ===== 경로 =====
 data_root: /content/MIMII_project_preprocessed
-out_root: /content/drive/MyDrive/MIMII_project/outputs
-
-# 공통 spectrogram 정규화 통계.
-# 전처리 담당이 training-normal에서 계산해 저장한 값을 A/B가 동일하게 사용한다.
+project_root: /content/MIMII_project_preprocessed/project
+manifest: /content/MIMII_project_preprocessed/project/manifest.csv
 normalization_stats: /content/MIMII_project_preprocessed/project/normalization_stats.json
-
-# 기존 파일별 로더용 템플릿.
-# 실제 배포 데이터는 (clip,8,128,64) 묶음 + manifest 구조이므로 manifest 기반 로더로 수정 예정.
-layout: "{snr}/{machine}/id_{id}/{label}/*.npy"
+out_root: /content/drive/MyDrive/MIMII_project/outputs
 
 # ===== 실험 조건 =====
 machines: [pump, fan]
 ids: ["00", "02"]
-snrs: ["6dB"]
-srs: [16000]
-layers: [layer4]
-k: 1
-seeds: [0, 1, 2]
+snrs: [6]               # Exp2: [6, 0, -6]
+srs: [16000]            # Exp3: [16000, 8000, 4000, 2000]
+layers: [layer4]        # Exp4: [layer4, layer3]
+k: 1                    # 부록: 3, 5
 
-# ===== 분할·평가 =====
-val_frac: 0.1
+# ===== 평가 =====
 threshold_percentile: 95
 batch_size: 256
