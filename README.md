@@ -1,6 +1,6 @@
 # MIMII Model B: ResNet18 + kNN
 
-## 실제 전처리 데이터 구조
+## 데이터 구조
 
 전처리 bundle은 조건별 clip을 하나의 배열에 묶어 저장한다.
 
@@ -9,17 +9,29 @@ project/features/fan_+6dB_16000.npy
 shape = (n_clips, 8, 128, 64)
 ```
 
-`project/manifest.csv`의 `feature_file`, `feature_index`가 각 clip과 feature 배열 row를 연결한다.
-manifest에는 이미 `train / val / test` split도 저장되어 있으므로 이 split을 그대로 사용한다.
+`project/manifest.csv`의 `feature_file`, `feature_index`를 사용해 각 clip을 feature 배열과 연결한다.
+
+## Seed별 split
+
+manifest에 들어 있는 기존 `split` 값은 실험에 사용하지 않는다.
+
+각 seed마다 clip 단위로 다시 나눈다.
+
+```text
+abnormal 전부 -> test
+normal 중 abnormal과 같은 개수 -> test
+남은 normal -> train 90% / val 10%
+```
+
+seed가 바뀌면 normal clip의 test/val/train 구성이 달라진다.
 
 ## Model B 입력 정규화
 
-`normalization_stats.json`에 따르면 Model B(ResNet18)는 ConvAE와 다른 입력 정규화를 사용한다.
+각 seed에서 새로 정해진 train-normal window만 사용해 p01/p99를 다시 계산한다.
 
 ```text
 log-mel dB window
--> 해당 machine / device ID / SNR / sample rate의
-   train-normal p01, p99 사용
+-> seed별 train-normal p01/p99
 -> p01~p99를 [0,1]로 scaling + clipping
 -> 3채널 복사
 -> 224x224 bilinear resize
@@ -27,7 +39,16 @@ log-mel dB window
 -> pretrained ResNet18
 ```
 
-ConvAE용 per-mel mean/std는 Model B에서 사용하지 않는다.
+따라서 test/val 데이터는 p01/p99 계산에 사용되지 않는다.
+
+p01/p99가 seed마다 달라지므로 ResNet feature도 seed마다 다시 추출하며,
+feature cache 파일명에도 seed를 포함한다.
+
+```text
+features/{condition}_s0.npz
+features/{condition}_s1.npz
+features/{condition}_s2.npz
+```
 
 ## Colab 실행
 
@@ -46,12 +67,5 @@ drive.mount('/content/drive')
 !python run_dn2.py --config config.yaml
 ```
 
-결과는 `out_root`에 저장된다.
-
-## 현재 split 관련 주의
-
-전처리 bundle의 normalization 통계는 manifest에 저장된 train split 기준으로 계산되어 있다.
-따라서 현재 코드는 manifest split을 그대로 사용한다.
-
-계획서의 3 random seeds 실험을 하려면 seed마다 train/val/test를 다시 나누고,
-각 seed의 train-normal에서 p01/p99도 다시 계산해야 한다.
+최종 `dn2_results.csv`에는 seed별 결과가 저장되고,
+출력 요약은 3개 seed의 AUROC mean ± std를 계산한다.
