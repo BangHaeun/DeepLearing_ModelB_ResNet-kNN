@@ -1,7 +1,11 @@
 """모델 B 전체 실행.
 
-manifest에 저장된 train/val/test split을 그대로 사용한다.
-전처리 bundle의 normalization_stats도 이 split의 train-normal로 계산되어 있다.
+각 seed마다:
+  1) clip 단위 train/val/test split 재생성
+  2) 그 seed의 train-normal window만으로 p01/p99 계산
+  3) 해당 p01/p99로 ResNet 입력 전처리 및 feature 추출
+  4) train-normal feature를 memory bank로 사용
+  5) val/test 평가
 """
 
 import argparse
@@ -12,34 +16,38 @@ import time
 import numpy as np
 import pandas as pd
 
-from dataset import cond_name, get_resnet_scaling, load_condition, load_config
+from dataset import (
+    cond_name,
+    load_condition,
+    load_config,
+    split_clips,
+    train_resnet_percentiles,
+)
 from evaluate import clip_scores, evaluate
 from model_dn2 import FeatureExtractor, get_device, knn_scores
 
 
-def get_features(cfg, extractor, machine, mid, snr, sr):
+def get_features(cfg, extractor, X, meta, name, seed, p01, p99):
     feat_dir = os.path.join(cfg["out_root"], "features")
     os.makedirs(feat_dir, exist_ok=True)
 
-    name = cond_name(machine, mid, snr, sr)
-    npz = os.path.join(feat_dir, f"{name}.npz")
-    meta_csv = os.path.join(feat_dir, f"{name}_meta.csv")
+    npz = os.path.join(feat_dir, f"{name}_s{seed}.npz")
 
-    if os.path.exists(npz) and os.path.exists(meta_csv):
+    if os.path.exists(npz):
         z = np.load(npz)
-        return (
-            z["layer3"],
-            z["layer4"],
-            pd.read_csv(meta_csv),
-            float(z["extract_ms_per_clip"]),
-        )
+        cached_p01 = float(z["train_db_p01"])
+        cached_p99 = float(z["train_db_p99"])
 
-    X, meta = load_condition(cfg, machine, mid, snr, sr)
-    p01, p99 = get_resnet_scaling(cfg, machine, mid, snr, sr)
+        if np.isclose(cached_p01, p01) and np.isclose(cached_p99, p99):
+            return (
+                z["layer3"],
+                z["layer4"],
+                float(z["extract_ms_per_clip"]),
+            )
 
     t0 = time.time()
     f = extractor(X, p01, p99, cfg["batch_size"])
-    ms = (time.time() - t0) * 1000 / meta.clip_id.nunique()
+    ms = (time.time() - t0) * 1000 / meta["clip_id"].nunique()
 
     np.savez(
         npz,
@@ -48,10 +56,10 @@ def get_features(cfg, extractor, machine, mid, snr, sr):
         extract_ms_per_clip=ms,
         train_db_p01=p01,
         train_db_p99=p99,
+        seed=int(seed),
     )
-    meta.to_csv(meta_csv, index=False)
 
-    return f["layer3"], f["layer4"], meta, ms
+    return f["layer3"], f["layer4"], ms
 
 
 def main():
@@ -73,8 +81,10 @@ def main():
             int(r["sr"]),
             r["layer"],
             int(r["k"]),
+            int(r["seed"]),
         )
         for r in rows
+        if "seed" in r
     }
 
     device = get_device()
@@ -88,74 +98,92 @@ def main():
         name = cond_name(machine, mid, snr, sr)
 
         try:
-            f3, f4, meta, ext_ms = get_features(
-                cfg, extractor, machine, mid, snr, sr
-            )
-        except (FileNotFoundError, KeyError, ValueError) as e:
+            X, base_meta = load_condition(cfg, machine, mid, snr, sr)
+        except (FileNotFoundError, ValueError) as e:
             print(f"[skip] {name}: {e}")
             continue
 
-        feats = {"layer3": f3, "layer4": f4}
-
-        for layer in cfg["layers"]:
-            key = (machine, str(mid).zfill(2), int(snr), int(sr), layer, k)
-            if key in done:
+        for seed in cfg["seeds"]:
+            try:
+                meta = split_clips(base_meta, seed, cfg["val_frac"])
+                p01, p99 = train_resnet_percentiles(X, meta)
+                f3, f4, ext_ms = get_features(
+                    cfg, extractor, X, meta, name, seed, p01, p99
+                )
+            except ValueError as e:
+                print(f"[skip] {name} seed={seed}: {e}")
                 continue
 
-            F_ = feats[layer]
-            tr = (meta["split"] == "train").to_numpy()
-            ev = ~tr
+            feats = {"layer3": f3, "layer4": f4}
 
-            # manifest의 train은 정상만이어야 한다.
-            if np.any(meta.loc[tr, "label"].to_numpy() != 0):
-                raise ValueError(f"{name}: train split에 abnormal이 포함되어 있습니다.")
+            for layer in cfg["layers"]:
+                key = (
+                    machine,
+                    str(mid).zfill(2),
+                    int(snr),
+                    int(sr),
+                    layer,
+                    k,
+                    int(seed),
+                )
+                if key in done:
+                    continue
 
-            bank = F_[tr]
+                F_ = feats[layer]
+                tr = (meta["split"] == "train").to_numpy()
+                ev = ~tr
 
-            t0 = time.time()
-            s_eval = knn_scores(bank, F_[ev], k=k, device=device)
-            n_eval_clips = meta.loc[ev, "clip_id"].nunique()
-            knn_ms = (time.time() - t0) * 1000 / n_eval_clips
+                bank = F_[tr]
 
-            eval_meta = meta.loc[ev].reset_index(drop=True)
-            clips = clip_scores(eval_meta, s_eval)
+                t0 = time.time()
+                s_eval = knn_scores(bank, F_[ev], k=k, device=device)
+                n_eval_clips = meta.loc[ev, "clip_id"].nunique()
+                knn_ms = (time.time() - t0) * 1000 / n_eval_clips
 
-            score_path = os.path.join(
-                out, "scores", f"{name}_{layer}_k{k}.csv"
-            )
-            clips.to_csv(score_path, index=False)
+                eval_meta = meta.loc[ev].reset_index(drop=True)
+                clips = clip_scores(eval_meta, s_eval)
 
-            r = evaluate(clips, cfg["threshold_percentile"])
-            r.update(
-                machine=machine,
-                id=str(mid).zfill(2),
-                snr=int(snr),
-                sr=int(sr),
-                layer=layer,
-                k=k,
-                n_train_windows=int(tr.sum()),
-                extract_ms_per_clip=ext_ms,
-                knn_ms_per_clip=knn_ms,
-            )
+                score_path = os.path.join(
+                    out, "scores", f"{name}_{layer}_k{k}_s{seed}.csv"
+                )
+                clips.to_csv(score_path, index=False)
 
-            rows.append(r)
-            pd.DataFrame(rows).to_csv(res_path, index=False)
+                r = evaluate(clips, cfg["threshold_percentile"])
+                r.update(
+                    machine=machine,
+                    id=str(mid).zfill(2),
+                    snr=int(snr),
+                    sr=int(sr),
+                    layer=layer,
+                    k=k,
+                    seed=int(seed),
+                    train_db_p01=p01,
+                    train_db_p99=p99,
+                    n_train_windows=int(tr.sum()),
+                    extract_ms_per_clip=ext_ms,
+                    knn_ms_per_clip=knn_ms,
+                )
 
-            print(
-                f"{name} {layer} k={k}: "
-                f"AUROC(mean)={r['auroc_mean']:.3f} "
-                f"AUROC(max)={r['auroc_max']:.3f}"
-            )
+                rows.append(r)
+                pd.DataFrame(rows).to_csv(res_path, index=False)
+
+                print(
+                    f"{name} seed={seed} {layer} k={k}: "
+                    f"p01={p01:.3f} p99={p99:.3f} "
+                    f"AUROC(mean)={r['auroc_mean']:.3f} "
+                    f"AUROC(max)={r['auroc_max']:.3f}"
+                )
 
     df = pd.DataFrame(rows)
     if len(df):
-        print(
+        summary = (
             df.groupby(["machine", "id", "snr", "sr", "layer", "k"])[
                 ["auroc_mean", "auroc_max"]
             ]
-            .mean()
+            .agg(["mean", "std"])
             .round(3)
         )
+        print(summary)
 
 
 if __name__ == "__main__":
